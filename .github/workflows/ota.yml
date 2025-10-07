@@ -2,8 +2,7 @@ name: Build & Deploy ESP32 OTA (AppServ/Windows)
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -32,7 +31,6 @@ jobs:
           arduino-cli lib update-index
           arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-      # ดึงเลขเวอร์ชันจาก Send/Send.ino → #define CURRENT_VERSION "x.y.z"
       - name: Extract firmware version
         id: ver
         run: |
@@ -43,13 +41,11 @@ jobs:
           VER=$(printf "%s" "$VER" | tr -d '\r\n ' | sed -E 's/^[vV]//; s/[.]+$//')
           [ -n "$VER" ] || { echo "Version not found in $FILE"; exit 1; }
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "Detected version: $VER"
 
       - name: Compile firmware
         run: |
           set -euxo pipefail
           mkdir -p build
-          # ปรับ FQBN ให้ตรงรุ่นบอร์ดถ้าไม่ใช่ esp32:esp32:esp32
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
             --build-path build \
@@ -78,7 +74,7 @@ jobs:
     needs: build
     runs-on: [self-hosted, Windows]
     env:
-      # ใช้ Repository Variable (Settings → Secrets and variables → Variables)
+      # ใช้ Repository Variable เท่านั้น (ต้องสร้างไว้แล้ว)
       APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL }}
 
     steps:
@@ -87,18 +83,15 @@ jobs:
         with:
           name: firmware_v${{ needs.build.outputs.version }}
 
-      # ใช้ CMD เพื่อตัดปัญหา PowerShell SecretMasker บน Windows runner
       - name: Make version.json for AppServ (CMD)
         shell: cmd
         run: |
           @echo off
           setlocal enabledelayedexpansion
-
           if "%APPSERV_BASE_URL%"=="" (
-            echo APPSERV_BASE_URL is empty. Create a repository Variable.
+            echo APPSERV_BASE_URL is empty. Create repo Variable in Settings.
             exit /b 1
           )
-
           set "BASE=%APPSERV_BASE_URL%"
           if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
 
@@ -108,13 +101,13 @@ jobs:
           if not defined SHA ( echo Cannot compute SHA256 & exit /b 1 )
           set "SHA=%SHA: =%"
 
-          rem Size
+          rem SIZE
           for %%A in (firmware.bin) do set "SIZE=%%~zA"
 
           rem UTC ISO8601
           for /f %%I in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString(\"s\") + \"Z\""') do set "BUILD=%%I"
 
-          > version.json echo {
+          >version.json echo {
           >>version.json echo   "version": "${{ needs.build.outputs.version }}",
           >>version.json echo   "url": "%BASE%/firmware.bin",
           >>version.json echo   "sha256": "%SHA%",
