@@ -1,0 +1,118 @@
+name: Build & Deploy ESP32 OTA (AppServ/Windows)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Arduino CLI
+      uses: arduino/setup-arduino-cli@v2
+
+    - name: Install ESP32 core
+      run: |
+        set -euxo pipefail
+        arduino-cli config init
+        arduino-cli core update-index
+        arduino-cli core install esp32:esp32@3.0.7
+        arduino-cli core list
+
+    - name: Install libraries
+      run: |
+        set -euxo pipefail
+        arduino-cli lib update-index
+        arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
+        arduino-cli lib list
+
+    # อ่านเวอร์ชันจาก Send/Send.ino
+    - name: Extract firmware version
+      id: ver
+      run: |
+        set -euo pipefail
+        FILE="Send/Send.ino"
+        [ -f "$FILE" ] || { echo "File not found: $FILE"; ls -R; exit 1; }
+        VER=$(grep -oE '#define[[:space:]]+CURRENT_VERSION[[:space:]]+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
+        VER=$(printf "%s" "$VER" | tr -d '\r\n ' | sed -E 's/^[vV]//; s/[.]+$//')
+        [ -n "$VER" ] || { echo "Version not found in $FILE"; exit 1; }
+        echo "version=$VER" >> $GITHUB_OUTPUT
+        echo "Detected version: $VER"
+
+    - name: Compile firmware
+      run: |
+        set -euxo pipefail
+        mkdir -p build
+        # ปรับ FQBN ให้ตรงบอร์ดจริงถ้าจำเป็น (esp32s3/esp32c3 เป็นต้น)
+        arduino-cli compile \
+          --fqbn esp32:esp32:esp32 \
+          --build-path build \
+          --export-binaries \
+          --warnings default \
+          Send
+        ls -lahR build
+
+    - name: Prepare artifacts
+      run: |
+        set -euo pipefail
+        BIN=$(ls -1t build/*.ino.bin 2>/dev/null | head -n1 || true)
+        [ -n "$BIN" ] || { echo "No sketch .ino.bin produced!"; exit 1; }
+        cp "$BIN" "firmware_v${{ steps.ver.outputs.version }}.bin"
+        cp "firmware_v${{ steps.ver.outputs.version }}.bin" firmware.bin
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: firmware_v${{ steps.ver.outputs.version }}
+        path: |
+          firmware.bin
+          firmware_v${{ steps.ver.outputs.version }}.bin
+
+  deploy:
+    needs: build
+    runs-on: [self-hosted, Windows]   # รันบนเครื่อง AppServ ของคุณ
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: firmware_v${{ needs.build.outputs.version }}
+
+    - name: Make version.json for AppServ
+      shell: pwsh
+      env:
+        APPSERV_BASE_URL: ${{ secrets.APPSERV_BASE_URL }}
+      run: |
+        $ver  = '${{ needs.build.outputs.version }}'
+        $url  = "$env:APPSERV_BASE_URL/firmware.bin"
+        $sha  = (Get-FileHash 'firmware.bin' -Algorithm SHA256).Hash.ToLower()
+        $size = (Get-Item 'firmware.bin').Length
+        $obj  = [ordered]@{
+          version = $ver
+          url = $url
+          sha256 = $sha
+          size_bytes = $size
+          build_time_utc = (Get-Date).ToUniversalTime().ToString("s") + "Z"
+        }
+        ($obj | ConvertTo-Json -Depth 3) | Set-Content -Path 'version.json' -Encoding UTF8
+        Get-Content version.json
+
+    - name: Copy to AppServ www
+      shell: pwsh
+      env:
+        TARGET_DIR: 'C:\AppServ\www'
+      run: |
+        New-Item -ItemType Directory -Force -Path $env:TARGET_DIR | Out-Null
+        Copy-Item -Force 'firmware.bin' (Join-Path $env:TARGET_DIR 'firmware.bin')
+        Copy-Item -Force 'version.json' (Join-Path $env:TARGET_DIR 'version.json')
+        Copy-Item -Force "firmware_v${{ needs.build.outputs.version }}.bin" (Join-Path $env:TARGET_DIR "firmware_v${{ needs.build.outputs.version }}.bin")
+        Write-Host "Deployed to $env:TARGET_DIR"
+        Write-Host "URLs:"
+        Write-Host "  $env:APPSERV_BASE_URL/firmware.bin"
+        Write-Host "  $env:APPSERV_BASE_URL/version.json"
