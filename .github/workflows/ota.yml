@@ -74,76 +74,69 @@ jobs:
             firmware.bin
             firmware_v${{ steps.ver.outputs.version }}.bin
 
-  deploy:
-    needs: build
-    runs-on: [self-hosted, Windows]
+ deploy:
+  needs: build
+  runs-on: [self-hosted, Windows]
+  # เลือก 1 ใน 3 วิธีตั้งค่า BASE URL:
+  # 1) ถ้ามี Repository Variable → ใช้บรรทัด env ด้านล่างนี้ (พร้อม fallback):
+  env:
+    APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL || 'http://172.20.10.7' }}
+  # 2) ถ้าใช้ Environment (ชื่อ appserv) ให้ใส่:
+  # environment: appserv
+  # และคง env ด้านบนไว้ก็ได้ (เผื่อเป็น fallback)
 
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: firmware_v${{ needs.build.outputs.version }}
+  steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: firmware_v${{ needs.build.outputs.version }}
 
-      # ใช้ CMD ทั้ง step เพื่อหลบ PowerShell SecretMasker bug
-      - name: Make version.json for AppServ (CMD)
-        shell: cmd
-        env:
-          APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL }}   # ตั้งใน repo → Settings → Variables
-        run: |
-          @echo off
-          setlocal enabledelayedexpansion
+    - name: Make version.json for AppServ (CMD)
+      shell: cmd
+      run: |
+        @echo off
+        setlocal enabledelayedexpansion
 
-          if "%APPSERV_BASE_URL%"=="" (
-            echo APPSERV_BASE_URL variable is empty
-            exit /b 1
-          )
+        if "%APPSERV_BASE_URL%"=="" (
+          echo APPSERV_BASE_URL is empty. Set a repo Variable or edit env fallback.
+          exit /b 1
+        )
 
-          set "VER=${{ needs.build.outputs.version }}"
-          set "BASE=%APPSERV_BASE_URL%"
-          rem ตัดสแลชท้าย
-          if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
+        set "BASE=%APPSERV_BASE_URL%"
+        if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
 
-          rem ดึง SHA256 ด้วย certutil แล้วลบช่องว่าง
-          set "SHA="
-          for /f "skip=1 tokens=* delims=" %%L in ('certutil -hashfile firmware.bin SHA256 ^| findstr /v /c:"hash of" ^| findstr /v /c:"CertUtil"') do (
-            set "SHA=%%L"
-          )
-          if not defined SHA (
-            echo Cannot compute SHA256
-            exit /b 1
-          )
-          set "SHA=%SHA: =%"
+        rem SHA256
+        set "SHA="
+        for /f "skip=1 tokens=* delims=" %%L in ('certutil -hashfile firmware.bin SHA256 ^| findstr /v /c:"hash of" ^| findstr /v /c:"CertUtil"') do set "SHA=%%L"
+        if not defined SHA ( echo Cannot compute SHA256 & exit /b 1 )
+        set "SHA=%SHA: =%"
 
-          rem ขนาดไฟล์
-          for %%A in (firmware.bin) do set "SIZE=%%~zA"
+        rem Size
+        for %%A in (firmware.bin) do set "SIZE=%%~zA"
 
-          rem เวลาปัจจุบันแบบ UTC ISO8601 (เรียก powershell จาก cmd ได้ ปลอดภัย)
-          for /f %%I in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString(\"s\") + \"Z\""') do set "BUILD=%%I"
+        rem UTC time
+        for /f %%I in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString(\"s\") + \"Z\""') do set "BUILD=%%I"
 
-          > version.json echo {
-          >>version.json echo   "version": "%VER%",
-          >>version.json echo   "url": "%BASE%/firmware.bin",
-          >>version.json echo   "sha256": "%SHA%",
-          >>version.json echo   "size_bytes": %SIZE%,
-          >>version.json echo   "build_time_utc": "%BUILD%"
-          >>version.json echo }
+        >version.json echo {^
+        "version":"${{ needs.build.outputs.version }}",^
+        "url":"%BASE%/firmware.bin",^
+        "sha256":"%SHA%",^
+        "size_bytes":%SIZE%,^
+        "build_time_utc":"%BUILD%"^
+        }
+        type version.json
 
-          type version.json
-
-      - name: Copy to AppServ www (CMD)
-        shell: cmd
-        env:
-          TARGET_DIR: C:\AppServ\www
-          APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL }}
-        run: |
-          @echo off
-          if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
-          copy /Y firmware.bin "%TARGET_DIR%\firmware.bin" >NUL
-          copy /Y version.json "%TARGET_DIR%\version.json" >NUL
-          copy /Y "firmware_v${{ needs.build.outputs.version }}.bin" "%TARGET_DIR%\firmware_v${{ needs.build.outputs.version }}.bin" >NUL
-          echo Deployed to %TARGET_DIR%
-          set "BASE=%APPSERV_BASE_URL%"
-          if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
-          echo URLs:
-          echo   %BASE%/firmware.bin
-          echo   %BASE%/version.json
+    - name: Copy to AppServ www (CMD)
+      shell: cmd
+      env:
+        TARGET_DIR: C:\AppServ\www
+      run: |
+        @echo off
+        if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
+        copy /Y firmware.bin "%TARGET_DIR%\firmware.bin" >NUL
+        copy /Y version.json "%TARGET_DIR%\version.json" >NUL
+        copy /Y "firmware_v${{ needs.build.outputs.version }}.bin" "%TARGET_DIR%\firmware_v${{ needs.build.outputs.version }}.bin" >NUL
+        echo Deployed to %TARGET_DIR%
+        echo URLS:
+        echo   %APPSERV_BASE_URL%/firmware.bin
+        echo   %APPSERV_BASE_URL%/version.json
