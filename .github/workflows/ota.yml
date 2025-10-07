@@ -32,7 +32,7 @@ jobs:
           arduino-cli lib update-index
           arduino-cli lib install "WiFiManager" "ArduinoJson" "ModbusMaster" "LoRa"
 
-      # อ่านเวอร์ชันจาก Send/Send.ino
+      # ดึงเลขเวอร์ชันจาก Send/Send.ino → #define CURRENT_VERSION "x.y.z"
       - name: Extract firmware version
         id: ver
         run: |
@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p build
-          # ปรับ FQBN ให้ตรงรุ่นบอร์ดถ้าจำเป็น
+          # ปรับ FQBN ให้ตรงรุ่นบอร์ดถ้าไม่ใช่ esp32:esp32:esp32
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
             --build-path build \
@@ -74,69 +74,66 @@ jobs:
             firmware.bin
             firmware_v${{ steps.ver.outputs.version }}.bin
 
- deploy:
-  needs: build
-  runs-on: [self-hosted, Windows]
-  # เลือก 1 ใน 3 วิธีตั้งค่า BASE URL:
-  # 1) ถ้ามี Repository Variable → ใช้บรรทัด env ด้านล่างนี้ (พร้อม fallback):
-  env:
-    APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL || 'http://172.20.10.7' }}
-  # 2) ถ้าใช้ Environment (ชื่อ appserv) ให้ใส่:
-  # environment: appserv
-  # และคง env ด้านบนไว้ก็ได้ (เผื่อเป็น fallback)
+  deploy:
+    needs: build
+    runs-on: [self-hosted, Windows]
+    env:
+      # ใช้ Repository Variable (Settings → Secrets and variables → Variables)
+      APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL }}
 
-  steps:
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: firmware_v${{ needs.build.outputs.version }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware_v${{ needs.build.outputs.version }}
 
-    - name: Make version.json for AppServ (CMD)
-      shell: cmd
-      run: |
-        @echo off
-        setlocal enabledelayedexpansion
+      # ใช้ CMD เพื่อตัดปัญหา PowerShell SecretMasker บน Windows runner
+      - name: Make version.json for AppServ (CMD)
+        shell: cmd
+        run: |
+          @echo off
+          setlocal enabledelayedexpansion
 
-        if "%APPSERV_BASE_URL%"=="" (
-          echo APPSERV_BASE_URL is empty. Set a repo Variable or edit env fallback.
-          exit /b 1
-        )
+          if "%APPSERV_BASE_URL%"=="" (
+            echo APPSERV_BASE_URL is empty. Create a repository Variable.
+            exit /b 1
+          )
 
-        set "BASE=%APPSERV_BASE_URL%"
-        if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
+          set "BASE=%APPSERV_BASE_URL%"
+          if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
 
-        rem SHA256
-        set "SHA="
-        for /f "skip=1 tokens=* delims=" %%L in ('certutil -hashfile firmware.bin SHA256 ^| findstr /v /c:"hash of" ^| findstr /v /c:"CertUtil"') do set "SHA=%%L"
-        if not defined SHA ( echo Cannot compute SHA256 & exit /b 1 )
-        set "SHA=%SHA: =%"
+          rem SHA256
+          set "SHA="
+          for /f "skip=1 tokens=* delims=" %%L in ('certutil -hashfile firmware.bin SHA256 ^| findstr /v /c:"hash of" ^| findstr /v /c:"CertUtil"') do set "SHA=%%L"
+          if not defined SHA ( echo Cannot compute SHA256 & exit /b 1 )
+          set "SHA=%SHA: =%"
 
-        rem Size
-        for %%A in (firmware.bin) do set "SIZE=%%~zA"
+          rem Size
+          for %%A in (firmware.bin) do set "SIZE=%%~zA"
 
-        rem UTC time
-        for /f %%I in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString(\"s\") + \"Z\""') do set "BUILD=%%I"
+          rem UTC ISO8601
+          for /f %%I in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString(\"s\") + \"Z\""') do set "BUILD=%%I"
 
-        >version.json echo {^
-        "version":"${{ needs.build.outputs.version }}",^
-        "url":"%BASE%/firmware.bin",^
-        "sha256":"%SHA%",^
-        "size_bytes":%SIZE%,^
-        "build_time_utc":"%BUILD%"^
-        }
-        type version.json
+          > version.json echo {
+          >>version.json echo   "version": "${{ needs.build.outputs.version }}",
+          >>version.json echo   "url": "%BASE%/firmware.bin",
+          >>version.json echo   "sha256": "%SHA%",
+          >>version.json echo   "size_bytes": %SIZE%,
+          >>version.json echo   "build_time_utc": "%BUILD%"
+          >>version.json echo }
+          type version.json
 
-    - name: Copy to AppServ www (CMD)
-      shell: cmd
-      env:
-        TARGET_DIR: C:\AppServ\www
-      run: |
-        @echo off
-        if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
-        copy /Y firmware.bin "%TARGET_DIR%\firmware.bin" >NUL
-        copy /Y version.json "%TARGET_DIR%\version.json" >NUL
-        copy /Y "firmware_v${{ needs.build.outputs.version }}.bin" "%TARGET_DIR%\firmware_v${{ needs.build.outputs.version }}.bin" >NUL
-        echo Deployed to %TARGET_DIR%
-        echo URLS:
-        echo   %APPSERV_BASE_URL%/firmware.bin
-        echo   %APPSERV_BASE_URL%/version.json
+      - name: Copy to AppServ www (CMD)
+        shell: cmd
+        env:
+          TARGET_DIR: C:\AppServ\www
+        run: |
+          @echo off
+          if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
+          copy /Y firmware.bin "%TARGET_DIR%\firmware.bin" >NUL
+          copy /Y version.json "%TARGET_DIR%\version.json" >NUL
+          copy /Y "firmware_v${{ needs.build.outputs.version }}.bin" "%TARGET_DIR%\firmware_v${{ needs.build.outputs.version }}.bin" >NUL
+          echo Deployed to %TARGET_DIR%
+          echo URLs:
+          echo   %APPSERV_BASE_URL%/firmware.bin
+          echo   %APPSERV_BASE_URL%/version.json
