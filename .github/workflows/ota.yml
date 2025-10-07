@@ -38,10 +38,10 @@ jobs:
         run: |
           set -euo pipefail
           FILE="Send/Send.ino"
-          if [ ! -f "$FILE" ]; then echo "File not found: $FILE"; ls -R; exit 1; fi
+          [ -f "$FILE" ] || { echo "File not found: $FILE"; ls -R; exit 1; }
           VER=$(grep -oE '#define[[:space:]]+CURRENT_VERSION[[:space:]]+"[^"]+"' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/')
           VER=$(printf "%s" "$VER" | tr -d '\r\n ' | sed -E 's/^[vV]//; s/[.]+$//')
-          if [ -z "$VER" ]; then echo "Version not found in $FILE"; exit 1; fi
+          [ -n "$VER" ] || { echo "Version not found in $FILE"; exit 1; }
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VER"
 
@@ -49,7 +49,7 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p build
-          # ปรับ FQBN ให้ตรงกับบอร์ดของคุณถ้าไม่ใช่ esp32:esp32:esp32
+          # ปรับ FQBN ให้ตรงรุ่นบอร์ดถ้าจำเป็น
           arduino-cli compile \
             --fqbn esp32:esp32:esp32 \
             --build-path build \
@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           BIN=$(ls -1t build/*.ino.bin 2>/dev/null | head -n1 || true)
-          if [ -z "$BIN" ]; then echo "No sketch .ino.bin produced!"; exit 1; fi
+          [ -n "$BIN" ] || { echo "No sketch .ino.bin produced!"; exit 1; }
           cp "$BIN" "firmware_v${{ steps.ver.outputs.version }}.bin"
           cp "firmware_v${{ steps.ver.outputs.version }}.bin" firmware.bin
 
@@ -84,38 +84,66 @@ jobs:
         with:
           name: firmware_v${{ needs.build.outputs.version }}
 
-      - name: Make version.json for AppServ
-        shell: pwsh
+      # ใช้ CMD ทั้ง step เพื่อหลบ PowerShell SecretMasker bug
+      - name: Make version.json for AppServ (CMD)
+        shell: cmd
         env:
           APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL }}   # ตั้งใน repo → Settings → Variables
         run: |
-          $ver  = '${{ needs.build.outputs.version }}'
-          if (-not $env:APPSERV_BASE_URL) { throw "APPSERV_BASE_URL variable is empty" }
-          $base = $env:APPSERV_BASE_URL.TrimEnd('/')
-          $url  = "$base/firmware.bin"
-          $sha  = (Get-FileHash 'firmware.bin' -Algorithm SHA256).Hash.ToLower()
-          $size = (Get-Item 'firmware.bin').Length
-          $obj  = [ordered]@{
-            version = $ver
-            url = $url
-            sha256 = $sha
-            size_bytes = $size
-            build_time_utc = (Get-Date).ToUniversalTime().ToString("s") + "Z"
-          }
-          ($obj | ConvertTo-Json -Depth 3) | Set-Content -Path 'version.json' -Encoding UTF8
-          Get-Content version.json
+          @echo off
+          setlocal enabledelayedexpansion
 
-      - name: Copy to AppServ www
-        shell: pwsh
+          if "%APPSERV_BASE_URL%"=="" (
+            echo APPSERV_BASE_URL variable is empty
+            exit /b 1
+          )
+
+          set "VER=${{ needs.build.outputs.version }}"
+          set "BASE=%APPSERV_BASE_URL%"
+          rem ตัดสแลชท้าย
+          if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
+
+          rem ดึง SHA256 ด้วย certutil แล้วลบช่องว่าง
+          set "SHA="
+          for /f "skip=1 tokens=* delims=" %%L in ('certutil -hashfile firmware.bin SHA256 ^| findstr /v /c:"hash of" ^| findstr /v /c:"CertUtil"') do (
+            set "SHA=%%L"
+          )
+          if not defined SHA (
+            echo Cannot compute SHA256
+            exit /b 1
+          )
+          set "SHA=%SHA: =%"
+
+          rem ขนาดไฟล์
+          for %%A in (firmware.bin) do set "SIZE=%%~zA"
+
+          rem เวลาปัจจุบันแบบ UTC ISO8601 (เรียก powershell จาก cmd ได้ ปลอดภัย)
+          for /f %%I in ('powershell -NoProfile -Command "[DateTime]::UtcNow.ToString(\"s\") + \"Z\""') do set "BUILD=%%I"
+
+          > version.json echo {
+          >>version.json echo   "version": "%VER%",
+          >>version.json echo   "url": "%BASE%/firmware.bin",
+          >>version.json echo   "sha256": "%SHA%",
+          >>version.json echo   "size_bytes": %SIZE%,
+          >>version.json echo   "build_time_utc": "%BUILD%"
+          >>version.json echo }
+
+          type version.json
+
+      - name: Copy to AppServ www (CMD)
+        shell: cmd
         env:
-          TARGET_DIR: 'C:\AppServ\www'
+          TARGET_DIR: C:\AppServ\www
           APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL }}
         run: |
-          New-Item -ItemType Directory -Force -Path $env:TARGET_DIR | Out-Null
-          Copy-Item -Force 'firmware.bin' (Join-Path $env:TARGET_DIR 'firmware.bin')
-          Copy-Item -Force 'version.json' (Join-Path $env:TARGET_DIR 'version.json')
-          Copy-Item -Force "firmware_v${{ needs.build.outputs.version }}.bin" (Join-Path $env:TARGET_DIR "firmware_v${{ needs.build.outputs.version }}.bin")
-          Write-Host "Deployed to $env:TARGET_DIR"
-          Write-Host "URLs:"
-          Write-Host "  $($env:APPSERV_BASE_URL.TrimEnd('/'))/firmware.bin"
-          Write-Host "  $($env:APPSERV_BASE_URL.TrimEnd('/'))/version.json"
+          @echo off
+          if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
+          copy /Y firmware.bin "%TARGET_DIR%\firmware.bin" >NUL
+          copy /Y version.json "%TARGET_DIR%\version.json" >NUL
+          copy /Y "firmware_v${{ needs.build.outputs.version }}.bin" "%TARGET_DIR%\firmware_v${{ needs.build.outputs.version }}.bin" >NUL
+          echo Deployed to %TARGET_DIR%
+          set "BASE=%APPSERV_BASE_URL%"
+          if "%BASE:~-1%"=="/" set "BASE=%BASE:~0,-1%"
+          echo URLs:
+          echo   %BASE%/firmware.bin
+          echo   %BASE%/version.json
