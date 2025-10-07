@@ -14,7 +14,7 @@
 
 // ---------------- CONFIG ----------------
 #define EEPROM_SIZE           8                                 // เก็บ "G1\0" + เผื่อ
-#define CURRENT_VERSION       "1.0.2 "                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
+#define CURRENT_VERSION       "1.0.3 "                          // <-- ตั้งเวอร์ชันเฟิร์มแวร์นี้
 const char* versionInfoUrl =  "http://172.20.10.7/version.json"; // <-- เปลี่ยนเป็น IP/โดเมน VM
 
 // เปิด/ปิดโหมดสุ่มข้อมูลแทนการอ่าน Modbus
