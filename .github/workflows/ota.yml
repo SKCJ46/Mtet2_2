@@ -84,11 +84,10 @@ jobs:
       with:
         name: firmware_v${{ needs.build.outputs.version }}
 
-    - name: Make version.json for AppServ
-      shell: pwsh
-      env:
-        APPSERV_BASE_URL: ${{ secrets.APPSERV_BASE_URL }}
-      run: |
+     - name: Make version.json for AppServ
+       shell: pwsh
+       env:
+         APPSERV_BASE_URL: ${{ vars.APPSERV_BASE_URL }}
         $ver  = '${{ needs.build.outputs.version }}'
         $url  = "$env:APPSERV_BASE_URL/firmware.bin"
         $sha  = (Get-FileHash 'firmware.bin' -Algorithm SHA256).Hash.ToLower()
